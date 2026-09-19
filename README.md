@@ -2,6 +2,10 @@
 
 > Ultra-fast, pure-Rust, Wayland-native notification daemon and notification center.
 
+<p align="center">
+  <img src="quiet_screencast_crop.gif" alt="Quiet Notification Center Screencast" width="760"/>
+</p>
+
 Quiet is an exact, pure-Rust drop-in replacement for `i3-notifier`, written by LLMs. It provides a modern notification daemon supporting the FreeDesktop `org.freedesktop.Notifications` standard, window manager keybindings (e.g. Sway and i3), and status bar modules like `py3notifier` (`py3status`) via zero-polling signal subscriptions. Instead of launching external menu tools like Rofi or dmenu, Quiet renders an in-process, flicker-free Wayland layer-shell overlay directly into shared memory.
 
 ---
