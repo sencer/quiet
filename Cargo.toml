@@ -1,0 +1,60 @@
+[package]
+name = "quiet"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sencer Selcuk <sencerselcuk@gmail.com>"]
+description = "High-performance, pure-Rust, Wayland-native notification daemon and center"
+license = "GPL-3.0-or-later"
+readme = "README.md"
+
+[dependencies]
+# Async Runtime & Concurrency
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs", "io-util"] }
+tokio-util = { version = "0.7", features = ["time"] }
+tokio-stream = "0.1"
+
+
+# D-Bus IPC (Pure Rust, zero C headers)
+zbus = { version = "5.19", default-features = false, features = ["tokio"] }
+zvariant = "5.15"
+
+# Wayland Layer-Shell Client & Event Loop
+smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop", "xkbcommon"] }
+calloop = "0.13"
+calloop-wayland-source = "0.3"
+
+
+xkeysym = "0.2"
+
+# Pure-Rust Vector Graphics & Font Shaping
+tiny-skia = "0.11"
+cosmic-text = { version = "0.12", default-features = false, features = ["std", "swash"] }
+
+
+# CLI & Configuration
+clap = { version = "4.5", features = ["derive", "help", "usage"] }
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.11"
+
+# OS Syscalls & Filesystem
+rustix = { version = "0.38", features = ["fs", "process"] }
+tempfile = "3.16"
+dirs = "6.0"
+
+# Logging & Diagnostics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+resvg = { version = "0.44", default-features = false }
+usvg = { version = "0.44", default-features = false }
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
