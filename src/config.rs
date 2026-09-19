@@ -1,4 +1,4 @@
-use crate::data::notification::Notification;
+use crate::data::notification::{Notification, SortOrder};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -6,7 +6,7 @@ use std::path::Path;
 use tracing::{info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default = "Config::empty")]
 pub struct Config {
     pub ui: UiConfig,
     pub behavior: BehaviorConfig,
@@ -21,6 +21,10 @@ pub struct BehaviorConfig {
     pub default_expire_timeout_ms: u64,
     pub max_notifications: usize,
     pub default_expires: bool,
+    #[serde(default, alias = "sort", alias = "default_sort", alias = "default_sort_order")]
+    pub sort_order: SortOrder,
+    #[serde(default, alias = "group_sort")]
+    pub group_sort_order: SortOrder,
 }
 
 impl Default for BehaviorConfig {
@@ -31,6 +35,8 @@ impl Default for BehaviorConfig {
             default_expire_timeout_ms: 5000,
             max_notifications: 500,
             default_expires: false,
+            sort_order: SortOrder::NewestToOldest,
+            group_sort_order: SortOrder::NewestToOldest,
         }
     }
 }
@@ -43,6 +49,8 @@ pub struct UiConfig {
     pub font_size: f32,
     pub font_family: String,
     pub bg_color: String,          // Hex e.g. "#282a36" or "#4c4c4c"
+    #[serde(alias = "card_background", alias = "normal_bg_color")]
+    pub card_bg_color: String,     // Normal card bg e.g. "#4c4c4c"
     pub cluster_bg_color: String,  // Group bg e.g. "#4c4c6c"
     pub selected_bg_color: String, // Selection e.g. "#6495ed"
     pub urgent_bg_color: String,   // Urgent e.g. "#cd5c5c"
@@ -52,6 +60,15 @@ pub struct UiConfig {
     pub margin_right: i32,
     pub margin_bottom: i32,
     pub margin_left: i32,
+    #[serde(alias = "padding_x", alias = "padding_y")]
+    pub padding: f32,
+    pub card_height: f32,
+    #[serde(alias = "spacing")]
+    pub card_spacing: f32,
+    #[serde(alias = "border_radius")]
+    pub corner_radius: f32,
+    #[serde(alias = "max_visible")]
+    pub max_visible_cards: usize,
     pub show_icons: bool,
     pub icon_size: u32,
     pub icon_theme: Option<String>,
@@ -60,11 +77,12 @@ pub struct UiConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            width: 780,
+            width: 600,
             max_height_ratio: 0.85,
             font_size: 21.0,
             font_family: "Fira Mono".into(),
             bg_color: "#00000000".into(), // 100% transparent window canvas (widget.rasi)
+            card_bg_color: "#4c4c4c".into(), // Normal card
             cluster_bg_color: "#4c4c6c".into(), // Group / active card
             selected_bg_color: "#6495ed".into(), // Selected card
             urgent_bg_color: "#cc5533".into(), // Urgent card
@@ -74,6 +92,11 @@ impl Default for UiConfig {
             margin_right: 0,
             margin_bottom: 0,
             margin_left: 0,
+            padding: 10.0,
+            card_height: 98.0,
+            card_spacing: 10.0,
+            corner_radius: 3.0,
+            max_visible_cards: 8,
             show_icons: true,
             icon_size: 64,
             icon_theme: Some("Papirus".into()),
@@ -109,6 +132,10 @@ pub struct RuleConfig {
     pub expire_timeout_ms: Option<i32>,
     pub ignore_close: Option<bool>,
     pub group_by: Option<Vec<String>>,
+    #[serde(alias = "sort_order", alias = "leaf_sort", alias = "leaf_sort_order")]
+    pub sort: Option<SortOrder>,
+    #[serde(alias = "group_sort_order")]
+    pub group_sort: Option<SortOrder>,
 }
 
 impl Config {
@@ -121,6 +148,7 @@ impl Config {
         }
 
         let candidates = [
+            dirs::config_dir().map(|d| d.join("quiet.toml")),
             dirs::config_dir().map(|d| d.join("quiet").join("config.toml")),
             dirs::config_dir().map(|d| d.join("sway").join("quiet.toml")),
             dirs::config_dir().map(|d| d.join("i3").join("quiet.toml")),
@@ -161,6 +189,8 @@ impl Config {
     pub fn apply_and_get_keys(&self, notification: &mut Notification) -> Vec<String> {
         let mut chosen_group_by: Option<Vec<String>> = None;
         let mut has_rule_expires = false;
+        let mut has_rule_sort = false;
+        let mut has_rule_group_sort = false;
 
         for rule in &self.rules {
             if rule.matches(notification) {
@@ -171,12 +201,26 @@ impl Config {
                 if rule.group_by.is_some() && chosen_group_by.is_none() {
                     chosen_group_by = rule.group_by.clone();
                 }
+                if rule.sort.is_some() {
+                    has_rule_sort = true;
+                }
+                if rule.group_sort.is_some() {
+                    has_rule_group_sort = true;
+                }
                 break; // First matching rule wins (matching i3-notifier behavior)
             }
         }
 
         if !has_rule_expires {
             notification.expires = self.behavior.default_expires;
+        }
+
+        if !has_rule_sort {
+            notification.sort_order = self.behavior.sort_order;
+        }
+
+        if !has_rule_group_sort {
+            notification.group_sort_order = Some(self.behavior.group_sort_order);
         }
 
         let fields = chosen_group_by.unwrap_or_else(|| vec!["app_name".into(), "body".into()]);
@@ -335,112 +379,39 @@ impl RuleConfig {
                 n.expires = false;
             }
         }
+
+        if let Some(sort) = self.sort {
+            n.sort_order = sort;
+        }
+
+        if let Some(group_sort) = self.group_sort {
+            n.group_sort_order = Some(group_sort);
+        }
+    }
+}
+
+pub const DEFAULT_CONFIG_TOML: &str = include_str!("../quiet.toml");
+
+impl Config {
+    /// Creates a blank configuration without any rules.
+    pub fn empty() -> Self {
+        Self {
+            ui: UiConfig::default(),
+            behavior: BehaviorConfig::default(),
+            rules: Vec::new(),
+        }
     }
 }
 
 impl Default for Config {
     fn default() -> Self {
-        // Builtin default rules matching the user's ~/.config/sway/i3_notifier_config.py exactly!
-        let rules = vec![
-            // Gmail
-            RuleConfig {
-                name: Some("Gmail".into()),
-                app_name: Some("Google Chrome".into()),
-                body_prefix: Some("mail.google.com".into()),
-                strip_body_prefix: Some("mail.google.com".into()),
-                set_app_name: Some("Gmail".into()),
-                set_app_icon: Some("gmail".into()),
-                ignore_close: Some(true),
-                group_by: Some(vec!["app_name".into(), "body".into()]),
-                ..Default::default()
-            },
-            // Chat
-            RuleConfig {
-                name: Some("Chat".into()),
-                app_name: Some("Google Chrome".into()),
-                body_prefix: Some("chat.google.com".into()),
-                strip_body_prefix: Some("chat.google.com".into()),
-                set_app_name: Some("Chat".into()),
-                set_app_icon: Some("google-chat".into()),
-                group_by: Some(vec!["app_name".into(), "body".into()]),
-                ..Default::default()
-            },
-            // Meet
-            RuleConfig {
-                name: Some("Meet".into()),
-                app_name: Some("Google Chrome".into()),
-                body_prefix: Some("meet.google.com".into()),
-                strip_body_prefix: Some("meet.google.com".into()),
-                set_app_name: Some("Meet".into()),
-                set_app_icon: Some("meet".into()),
-                group_by: Some(vec!["app_name".into(), "body".into()]),
-                ..Default::default()
-            },
-            // WhatsApp
-            RuleConfig {
-                name: Some("WhatsApp".into()),
-                app_name: Some("Google Chrome".into()),
-                body_prefix: Some("web.whatsapp.com".into()),
-                strip_body_prefix: Some("web.whatsapp.com".into()),
-                set_app_name: Some("WhatsApp".into()),
-                set_app_icon: Some("whatsapp".into()),
-                group_by: Some(vec!["app_name".into(), "summary".into()]),
-                ..Default::default()
-            },
-            // Twitter
-            RuleConfig {
-                name: Some("Twitter".into()),
-                app_name: Some("Google Chrome".into()),
-                body_prefix: Some("twitter.com".into()),
-                strip_body_prefix: Some("twitter.com".into()),
-                set_app_name: Some("Twitter".into()),
-                set_app_icon: Some("twitter".into()),
-                group_by: Some(vec!["app_name".into(), "body".into()]),
-                ..Default::default()
-            },
-            // Instagram
-            RuleConfig {
-                name: Some("Instagram".into()),
-                app_name: Some("Google Chrome".into()),
-                body_prefix: Some("www.instagram.com".into()),
-                strip_body_prefix: Some("www.instagram.com".into()),
-                set_app_name: Some("Instagram".into()),
-                set_app_icon: Some("photos".into()),
-                group_by: Some(vec!["app_name".into(), "body".into()]),
-                ..Default::default()
-            },
-            // Chrome general fallback
-            RuleConfig {
-                name: Some("Chrome".into()),
-                app_name: Some("Google Chrome".into()),
-                set_app_icon: Some("google-chrome".into()),
-                set_app_name_from_body_line: Some(0),
-                strip_body_lines: Some(2),
-                group_by: Some(vec!["app_name".into()]),
-                ..Default::default()
-            },
-            // notify-send: expires = true, app_name set from summary
-            RuleConfig {
-                name: Some("notify-send".into()),
-                app_name: Some("notify-send".into()),
-                set_expires: Some(true),
-                expire_timeout_ms: Some(5000),
-                set_app_name_from_summary: Some(true),
-                set_app_icon: Some("plugin-notification".into()),
-                group_by: Some(vec!["app_name".into(), "body".into()]),
-                ..Default::default()
-            },
-        ];
-
-        let mut cfg = Self {
-            ui: UiConfig::default(),
-            behavior: BehaviorConfig::default(),
-            rules,
-        };
+        let mut cfg: Config = toml::from_str(DEFAULT_CONFIG_TOML)
+            .expect("default quiet.toml in repository must be valid TOML");
         cfg.compile_all_rules();
         cfg
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -530,5 +501,30 @@ mod tests {
         );
         rule.apply(&mut notif);
         assert_eq!(notif.body, "Actual Message Here");
+    }
+
+    #[test]
+    fn test_ui_custom_dimensions_and_fonts() {
+        let toml_str = r##"
+        [ui]
+        font_family = "JetBrains Mono"
+        font_size = 18.5
+        padding = 15.0
+        card_height = 110.0
+        spacing = 12.0
+        border_radius = 8.0
+        max_visible = 6
+        card_background = "#2a2a2a"
+        "##;
+
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.ui.font_family, "JetBrains Mono");
+        assert_eq!(cfg.ui.font_size, 18.5);
+        assert_eq!(cfg.ui.padding, 15.0);
+        assert_eq!(cfg.ui.card_height, 110.0);
+        assert_eq!(cfg.ui.card_spacing, 12.0);
+        assert_eq!(cfg.ui.corner_radius, 8.0);
+        assert_eq!(cfg.ui.max_visible_cards, 6);
+        assert_eq!(cfg.ui.card_bg_color, "#2a2a2a");
     }
 }

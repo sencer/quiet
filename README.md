@@ -133,6 +133,8 @@ bindsym $mod+e exec quiet --toggle
 bindsym $mod+e exec dbus-send --session --dest=org.freedesktop.Notifications /org/freedesktop/Notifications org.freedesktop.Notifications.ShowNotifications
 ```
 
+> **Note**: Toggling only opens the overlay when notifications exist. If there are no active notifications, invoking `$mod+e` does not trigger the UI overlay.
+
 ---
 
 ## Systemd User Service
@@ -188,48 +190,57 @@ When the notification overlay is open:
 
 Quiet looks for configuration files at the following locations in order:
 1. `--config <PATH>` (command line override)
-2. `~/.config/quiet/config.toml`
-3. `~/.config/sway/quiet.toml`
-4. `~/.config/i3/quiet.toml`
+2. `~/.config/quiet.toml`
+3. `~/.config/quiet/config.toml`
+4. `~/.config/sway/quiet.toml`
+5. `~/.config/i3/quiet.toml`
 
-### Example `config.toml`
+### Example `quiet.toml`
 
 ```toml
-[general]
-history_limit = 200
-default_expire_timeout_ms = 0 # 0 = do not expire automatically
-ignore_close = true           # Prevent clients (e.g. Gmail/Chrome 5s timer) from auto-closing unread items
+[behavior]
+sort = "newest"               # Global default sort: "newest" or "oldest"
+default_expires = false
+urgent_timeout_ms = 2500
 
 [ui]
-font_family = "Sans"
-font_size = 14.0
-width = 520
-margin_top = 28
-corner_radius = 12.0
-border_width = 2.0
-icon_size = 32
-
-[ui.colors]
-background = "#1e1e2ecc"
-card_background = "#313244cc"
-text_color = "#cdd6f4"
-urgent_text_color = "#f38ba8"
-border_color = "#89b4fa"
-accent_color = "#cba6f7"
+font_family = "Fira Mono"
+font_size = 21.0
+width = 600
+margin_top = 0
+padding = 10.0                # Window padding around cards (px)
+card_height = 98.0            # Height of each notification card (px)
+card_spacing = 10.0           # Vertical spacing between cards (px)
+corner_radius = 3.0           # Rounded corner radius (px)
+max_visible_cards = 8         # Maximum cards visible before scrolling
+show_icons = true
+icon_size = 64
 
 # Declarative grouping and matching rules:
 [[rules]]
+name = "WhatsApp"
 app_name = "Google Chrome"
-body_strip_lines = 1
-body_prefix_group = [
-    { prefix = "mail.google.com", group = "Gmail" },
-    { prefix = "web.whatsapp.com", group = "WhatsApp" },
-    { prefix = "meet.google.com", group = "Google Meet" },
-]
+body_prefix = "web.whatsapp.com"
+strip_body_prefix = "web.whatsapp.com"
+set_app_name = "WhatsApp"
+set_app_icon = "whatsapp"
+group_by = ["app_name", "summary"]
+sort = "oldest"               # Sort WhatsApp messages from a person oldest-to-newest!
 
 [[rules]]
+name = "Gmail"
+app_name = "Google Chrome"
+body_prefix = "mail.google.com"
+strip_body_prefix = "mail.google.com"
+set_app_name = "Gmail"
+set_app_icon = "gmail"
+group_by = ["app_name", "body"]
+
+[[rules]]
+name = "notify-send"
 app_name = "notify-send"
-group_by = ["summary"]
+set_expires = true
+group_by = ["app_name", "body"]
 ```
 
 ---

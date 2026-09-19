@@ -52,11 +52,11 @@ impl Renderer {
             return;
         }
 
-        let padding_x = 10.0 * scale;
-        let padding_y = 10.0 * scale;
-        let card_height = 98.0 * scale;
-        let card_spacing = 10.0 * scale;
-        let border_radius = 3.0 * scale;
+        let padding_x = config.ui.padding * scale;
+        let padding_y = config.ui.padding * scale;
+        let card_height = config.ui.card_height * scale;
+        let card_spacing = config.ui.card_spacing * scale;
+        let border_radius = config.ui.corner_radius * scale;
 
         // Empty state
         if items.is_empty() {
@@ -64,7 +64,7 @@ impl Renderer {
             let card_w = width - padding_x * 2.0;
             let card_rect = rounded_rect(card_x, padding_y, card_w, card_height, border_radius);
             let mut card_paint = Paint::default();
-            card_paint.set_color(SkiaColor::from_rgba8(76, 76, 76, 255)); // #4c4c4c
+            card_paint.set_color(parse_skia_color(&config.ui.card_bg_color, SkiaColor::from_rgba8(76, 76, 76, 255)));
             card_paint.anti_alias = true;
             if let Some(ref rect_path) = card_rect {
                 pixmap.fill_path(rect_path, &card_paint, FillRule::Winding, Transform::identity(), None);
@@ -164,8 +164,11 @@ impl Renderer {
                     SkiaColor::from_rgba8(76, 76, 108, 255),
                 )
             } else {
-                // Normal: #4c4c4c
-                SkiaColor::from_rgba8(76, 76, 76, 255)
+                // Normal card
+                parse_skia_color(
+                    &config.ui.card_bg_color,
+                    SkiaColor::from_rgba8(76, 76, 76, 255),
+                )
             };
 
             let mut card_paint = Paint::default();
@@ -235,16 +238,18 @@ impl Renderer {
             let font_size = config.ui.font_size * scale;
             let line1_y = curr_y + 18.0 * scale;
 
-            // Line 1: <b>Summary</b> <small>Time</small> <small>AppName</small>
-            let summary_text = if !item.summary.is_empty() {
+            // Line 1: <b>Title</b> <small>Time</small> <small>AppName</small>
+            let title_text = if !item.title.is_empty() {
+                &item.title
+            } else if !item.summary.is_empty() {
                 &item.summary
             } else {
-                &item.title
+                &item.app_name
             };
 
-            let summary_w = self.draw_styled_text(
+            let title_w = self.draw_styled_text(
                 pixmap,
-                summary_text,
+                title_text,
                 text_left,
                 line1_y,
                 title_color,
@@ -256,11 +261,15 @@ impl Renderer {
                 scale,
             );
 
-            let meta_x = text_left + summary_w + 10.0 * scale;
+            let meta_x = text_left + title_w + 10.0 * scale;
             let meta_max_w = (card_x + card_w - meta_x - 15.0 * scale).max(0.0);
             if meta_max_w > 12.0 * scale {
                 let meta_str = if !item.time_str.is_empty() && !item.app_name.is_empty() {
-                    format!("{} {}", item.time_str, item.app_name)
+                    if item.title.starts_with(&item.app_name) {
+                        item.time_str.clone()
+                    } else {
+                        format!("{} {}", item.time_str, item.app_name)
+                    }
                 } else if !item.time_str.is_empty() {
                     item.time_str.clone()
                 } else {

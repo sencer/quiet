@@ -259,7 +259,11 @@ impl Engine {
             if notif.id > max_id {
                 max_id = notif.id;
             }
-            let keys = self.config.apply_and_get_keys(&mut notif);
+            let keys = if let Some(k) = notif.keys.take() {
+                k
+            } else {
+                self.config.apply_and_get_keys(&mut notif)
+            };
             let id = notif.id;
 
             if notif.expires {
@@ -595,6 +599,12 @@ impl Engine {
                     .leafs()
                     .into_iter()
                     .filter(|n| !n.transient)
+                    .map(|mut n| {
+                        if let Some(keys) = self.map.get(&n.id) {
+                            n.keys = Some(keys.clone());
+                        }
+                        n
+                    })
                     .collect();
                 let json =
                     serde_json::to_string_pretty(&non_transient).unwrap_or_else(|_| "[]".into());
@@ -611,6 +621,9 @@ impl Engine {
                     self.ui_tx.send_command(UiCommand::Close);
                     self.emit_notifications_updated(2).await;
                 } else {
+                    if self.tree.is_empty() || self.tree.len() == 0 {
+                        return false;
+                    }
                     self.ui_open = true;
                     self.current_context.clear();
 
@@ -679,15 +692,22 @@ impl Engine {
                 }
             }
             UiEvent::ActionInvoked { id, action_key } => {
-                let is_resident = if let Some(keys) = self.map.get(&id) {
+                let (is_resident, hints) = if let Some(keys) = self.map.get(&id) {
                     let ctx = self.tree.get_context(keys, false);
                     if let Some(ClusterNode::Leaf(notif)) = ctx.children.get(&id.to_string()) {
-                        notif.resident
+                        (
+                            notif.resident,
+                            crate::ipc::sway::FocusTargetHints {
+                                app_name: notif.app_name.clone(),
+                                summary: notif.summary.clone(),
+                                body: notif.body.clone(),
+                            },
+                        )
                     } else {
-                        false
+                        (false, crate::ipc::sway::FocusTargetHints::default())
                     }
                 } else {
-                    false
+                    (false, crate::ipc::sway::FocusTargetHints::default())
                 };
 
                 if !is_resident {
@@ -702,7 +722,7 @@ impl Engine {
 
                 if self.config.behavior.focus_on_action {
                     let timeout = Duration::from_millis(self.config.behavior.urgent_timeout_ms);
-                    crate::ipc::sway::spawn_race_free_action_focus(timeout, move || async move {
+                    crate::ipc::sway::spawn_race_free_action_focus(timeout, hints, move || async move {
                         if let Some(ref conn) = dbus_conn {
                             if let Ok(emitter) =
                                 SignalEmitter::new(conn, "/org/freedesktop/Notifications")
@@ -865,7 +885,7 @@ impl Engine {
     }
 
     pub fn generate_ui_items(&self, context: &[String]) -> Vec<UiItem> {
-        let cluster = self.tree.get_context(context, true);
+        let (resolved_ctx, cluster) = self.tree.resolve_context(context, true);
         let mut items = Vec::new();
 
         for (key, node) in &cluster.children {
@@ -946,12 +966,48 @@ impl Engine {
             }
         }
 
-        // Sort items: highest urgency first; ties broken by newest (created_at desc)
-        items.sort_by(|a, b| {
-            b.urgency
-                .cmp(&a.urgency)
-                .then_with(|| b.created_at.cmp(&a.created_at))
-        });
+        // Determine sorting order for the current view:
+        // - Root view follows behavior.sort_order (default: NewestToOldest)
+        // - Intermediate group view follows group_sort_order (default: NewestToOldest)
+        // - Leaf notifications view follows leaf sort_order (e.g. OldestToNewest for WhatsApp)
+        let sort_order = if resolved_ctx.is_empty() {
+            self.config.behavior.sort_order
+        } else {
+            let has_sub_clusters = cluster
+                .children
+                .values()
+                .any(|node| matches!(node, ClusterNode::Cluster(_)));
+            if has_sub_clusters {
+                cluster
+                    .best()
+                    .and_then(|n| n.group_sort_order)
+                    .unwrap_or(self.config.behavior.group_sort_order)
+            } else {
+                cluster
+                    .best()
+                    .map(|n| n.sort_order)
+                    .unwrap_or(self.config.behavior.sort_order)
+            }
+        };
+
+        match sort_order {
+            crate::data::notification::SortOrder::NewestToOldest => {
+                items.sort_by(|a, b| {
+                    b.urgency
+                        .cmp(&a.urgency)
+                        .then_with(|| b.created_at.cmp(&a.created_at))
+                        .then_with(|| b.id.cmp(&a.id))
+                });
+            }
+            crate::data::notification::SortOrder::OldestToNewest => {
+                items.sort_by(|a, b| {
+                    b.urgency
+                        .cmp(&a.urgency)
+                        .then_with(|| a.created_at.cmp(&b.created_at))
+                        .then_with(|| a.id.cmp(&b.id))
+                });
+            }
+        }
 
         items
     }
@@ -965,6 +1021,12 @@ impl Engine {
             .leafs()
             .into_iter()
             .filter(|n| !n.transient)
+            .map(|mut n| {
+                if let Some(keys) = self.map.get(&n.id) {
+                    n.keys = Some(keys.clone());
+                }
+                n
+            })
             .collect();
         if let Err(e) = save_dump(&self.dump_path, &non_transient) {
             warn!("Failed to save notification dump: {}", e);

@@ -1,6 +1,6 @@
 pub mod render;
 
-use crate::config::Config;
+use crate::config::{Config, UiConfig};
 use crate::engine::{EngineMessage, UiCommand, UiEvent, UiItem};
 use crate::ui::render::Renderer;
 use calloop::channel::{channel, Event as ChannelEvent};
@@ -59,6 +59,8 @@ pub struct AppState {
     pub modifiers: Modifiers,
     pub scale_factor: i32,
     pub scroll_accumulator: f64,
+    pub last_action_time: std::time::Instant,
+    pub context_history: std::collections::HashMap<Vec<String>, (usize, usize)>,
 }
 
 delegate_compositor!(AppState);
@@ -478,6 +480,100 @@ impl KeyboardHandler for AppState {
     }
 }
 
+/// Pure navigation and layout state tracker, decoupled from Wayland types for testability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavState {
+    pub selected_index: usize,
+    pub scroll_offset: usize,
+    pub height: u32,
+    pub context: Vec<String>,
+    pub context_history: std::collections::HashMap<Vec<String>, (usize, usize)>,
+}
+
+impl NavState {
+    pub fn new(config: &UiConfig) -> Self {
+        Self {
+            selected_index: 0,
+            scroll_offset: 0,
+            height: Self::calc_target_height(0, config),
+            context: Vec::new(),
+            context_history: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn calc_target_height(count: usize, config: &UiConfig) -> u32 {
+        let card_height = config.card_height;
+        let card_spacing = config.card_spacing;
+        let padding = config.padding;
+        let count = count.max(1);
+        let max_visible = config.max_visible_cards;
+        let visible_count = count.min(max_visible);
+        let h = padding * 2.0 + (visible_count as f32) * card_height
+            + ((visible_count - 1) as f32) * card_spacing;
+        h.round() as u32
+    }
+
+    pub fn calc_max_visible_cards(height: u32, config: &UiConfig) -> usize {
+        let card_height = config.card_height;
+        let card_spacing = config.card_spacing;
+        let padding = config.padding;
+        let available = (height as f32 - padding * 2.0).max(card_height);
+        (((available + card_spacing) / (card_height + card_spacing)).floor() as usize).max(1)
+    }
+
+    pub fn adjust_scroll(&mut self, items_len: usize, config: &UiConfig) {
+        if items_len == 0 {
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        if self.selected_index >= items_len {
+            self.selected_index = items_len.saturating_sub(1);
+        }
+        let max_vis = Self::calc_max_visible_cards(self.height, config);
+        if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.scroll_offset + max_vis {
+            self.scroll_offset = self.selected_index - max_vis + 1;
+        }
+    }
+
+    pub fn open_ui(&mut self, items_len: usize, context: Vec<String>, config: &UiConfig) {
+        self.context = context;
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.context_history.clear();
+        self.height = Self::calc_target_height(items_len, config);
+    }
+
+    pub fn update_items(&mut self, items_len: usize, new_context: Vec<String>, config: &UiConfig) {
+        let old_context = std::mem::replace(&mut self.context, new_context);
+        let context_changed = old_context != self.context;
+
+        let target_h = Self::calc_target_height(items_len, config);
+        self.height = target_h;
+
+        if context_changed {
+            self.context_history
+                .insert(old_context, (self.selected_index, self.scroll_offset));
+            if let Some(&(idx, offset)) = self.context_history.get(&self.context) {
+                self.selected_index = idx.min(items_len.saturating_sub(1));
+                self.scroll_offset = offset;
+            } else {
+                self.selected_index = 0;
+                self.scroll_offset = 0;
+            }
+        }
+
+        self.adjust_scroll(items_len, config);
+    }
+
+    pub fn handle_configure(&mut self, items_len: usize, _stale_h: u32, config: &UiConfig) {
+        self.height = Self::calc_target_height(items_len, config);
+        self.adjust_scroll(items_len, config);
+    }
+}
+
 impl LayerShellHandler for AppState {
     fn configure(
         &mut self,
@@ -487,10 +583,11 @@ impl LayerShellHandler for AppState {
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        let (w, h) = configure.new_size;
+        let (w, _h) = configure.new_size;
         self.width = if w > 0 { w } else { self.config.ui.width };
-        let target_h = self.compute_target_height();
-        self.height = if h > 0 { h } else { target_h };
+        let mut nav = self.to_nav_state();
+        nav.handle_configure(self.items.len(), _h, &self.config.ui);
+        self.apply_nav_state(nav);
         self.configured = true;
         self.render_frame();
     }
@@ -505,48 +602,45 @@ impl LayerShellHandler for AppState {
 }
 
 impl AppState {
+    pub fn to_nav_state(&self) -> NavState {
+        NavState {
+            selected_index: self.selected_index,
+            scroll_offset: self.scroll_offset,
+            height: self.height,
+            context: self.context.clone(),
+            context_history: self.context_history.clone(),
+        }
+    }
+
+    pub fn apply_nav_state(&mut self, nav: NavState) {
+        self.selected_index = nav.selected_index;
+        self.scroll_offset = nav.scroll_offset;
+        self.height = nav.height;
+        self.context = nav.context;
+        self.context_history = nav.context_history;
+    }
+
     pub fn compute_target_height(&self) -> u32 {
-        let card_height = 98.0;
-        let card_spacing = 10.0;
-        let padding = 10.0;
-        let count = self.items.len().max(1);
-        let max_visible = 8;
-        let visible_count = count.min(max_visible);
-        let h = padding * 2.0 + (visible_count as f32) * card_height
-            + ((visible_count - 1) as f32) * card_spacing;
-        h.round() as u32
+        NavState::calc_target_height(self.items.len(), &self.config.ui)
     }
 
     pub fn max_visible_cards(&self) -> usize {
-        let card_height = 98.0;
-        let card_spacing = 10.0;
-        let padding = 10.0;
-        let available = (self.height as f32 - padding * 2.0).max(card_height);
-        (((available + card_spacing) / (card_height + card_spacing)).floor() as usize).max(1)
+        NavState::calc_max_visible_cards(self.height, &self.config.ui)
     }
 
     pub fn adjust_scroll(&mut self) {
-        if self.items.is_empty() {
-            self.selected_index = 0;
-            self.scroll_offset = 0;
-            return;
-        }
-        if self.selected_index >= self.items.len() {
-            self.selected_index = self.items.len().saturating_sub(1);
-        }
-        let max_vis = self.max_visible_cards();
-        if self.selected_index < self.scroll_offset {
-            self.scroll_offset = self.selected_index;
-        } else if self.selected_index >= self.scroll_offset + max_vis {
-            self.scroll_offset = self.selected_index - max_vis + 1;
-        }
+        let mut nav = self.to_nav_state();
+        nav.adjust_scroll(self.items.len(), &self.config.ui);
+        self.selected_index = nav.selected_index;
+        self.scroll_offset = nav.scroll_offset;
     }
 
     pub fn open_ui(&mut self, items: Vec<UiItem>, context: Vec<String>) {
         self.items = items;
-        self.context = context;
-        self.selected_index = 0;
-        self.scroll_offset = 0;
+        let mut nav = self.to_nav_state();
+        nav.open_ui(self.items.len(), context, &self.config.ui);
+        self.apply_nav_state(nav);
+        self.last_action_time = std::time::Instant::now();
 
         if self.config.ui.show_icons {
             for item in &self.items {
@@ -556,8 +650,7 @@ impl AppState {
             }
         }
 
-        let target_h = self.compute_target_height();
-        self.height = target_h;
+        let target_h = self.height;
         self.width = self.config.ui.width;
 
         if self.layer_surface.is_none() {
@@ -600,8 +693,11 @@ impl AppState {
 
     pub fn update_items(&mut self, items: Vec<UiItem>, context: Vec<String>) {
         self.items = items;
-        self.context = context;
-        self.adjust_scroll();
+        let mut nav = self.to_nav_state();
+        nav.update_items(self.items.len(), context, &self.config.ui);
+        self.apply_nav_state(nav);
+
+        let target_h = self.height;
 
         if self.config.ui.show_icons {
             for item in &self.items {
@@ -611,8 +707,6 @@ impl AppState {
             }
         }
 
-        let target_h = self.compute_target_height();
-        self.height = target_h;
         if let Some(ref layer) = self.layer_surface {
             layer.set_size(self.config.ui.width, target_h);
             layer.wl_surface().commit();
@@ -624,9 +718,9 @@ impl AppState {
     }
 
     pub fn handle_click_at_y(&mut self, y: f64, is_right_click: bool) {
-        let padding_y = 10.0;
-        let card_height = 98.0;
-        let card_spacing = 10.0;
+        let padding_y = self.config.ui.padding;
+        let card_height = self.config.ui.card_height;
+        let card_spacing = self.config.ui.card_spacing;
         let y_f32 = y as f32;
 
         if y_f32 < padding_y || y_f32 > self.height as f32 - padding_y || self.items.is_empty() {
@@ -677,6 +771,11 @@ impl AppState {
     }
 
     pub fn activate_selected(&mut self) {
+        if self.last_action_time.elapsed() < std::time::Duration::from_millis(150) {
+            return;
+        }
+        self.last_action_time = std::time::Instant::now();
+
         if let Some(item) = self.items.get(self.selected_index) {
             if item.is_group && item.count > 1 {
                 let _ = self
@@ -845,6 +944,8 @@ pub fn spawn_ui_worker(
                 modifiers: Modifiers::default(),
                 scale_factor: 1,
                 scroll_accumulator: 0.0,
+                last_action_time: std::time::Instant::now(),
+                context_history: std::collections::HashMap::new(),
             };
 
             let mut event_loop: EventLoop<'static, AppState> = match EventLoop::try_new() {
@@ -901,4 +1002,173 @@ pub fn spawn_ui_worker(
     }
 
     ret_tx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::UiConfig;
+
+    #[test]
+    fn test_nav_selection_reset_on_descend_to_child_group() {
+        let config = UiConfig::default();
+        let mut nav = NavState::new(&config);
+
+        // Root view with 5 items: Spotify (0), WhatsApp (1), Gmail (2), Slack (3), System (4)
+        nav.open_ui(5, vec![], &config);
+        assert_eq!(nav.selected_index, 0);
+
+        // User navigates cursor down to WhatsApp at index 1
+        nav.selected_index = 1;
+        assert_eq!(nav.selected_index, 1);
+
+        // Enter WhatsApp group (contains 2 subclusters: [0] Dev Team, [1] Mom)
+        nav.update_items(2, vec!["WhatsApp".to_string()], &config);
+
+        // REGRESSION TEST: Selection must reset to 0 (Dev Team), NOT inherit index 1 (Mom)!
+        assert_eq!(
+            nav.selected_index, 0,
+            "Entering a child group must select the top item (Dev Team at 0), not inherit index 1 (Mom)"
+        );
+        assert_eq!(nav.scroll_offset, 0);
+
+        // User navigates inside WhatsApp to Mom at index 1
+        nav.selected_index = 1;
+
+        // Enter Mom's conversation (contains 3 messages: [0] oldest, [1] middle, [2] newest)
+        nav.update_items(
+            3,
+            vec!["WhatsApp".to_string(), "Mom".to_string()],
+            &config,
+        );
+
+        // REGRESSION TEST: Selection must reset to 0 (oldest/first message)
+        assert_eq!(
+            nav.selected_index, 0,
+            "Entering Mom's conversation must select the first message (index 0)"
+        );
+    }
+
+    #[test]
+    fn test_nav_selection_restore_on_ascend() {
+        let config = UiConfig::default();
+        let mut nav = NavState::new(&config);
+
+        // Root view with 5 items
+        nav.open_ui(5, vec![], &config);
+        // Select Gmail at index 2
+        nav.selected_index = 2;
+
+        // Descend into Gmail (3 messages)
+        nav.update_items(3, vec!["Gmail".to_string()], &config);
+        assert_eq!(nav.selected_index, 0, "Descend starts at 0");
+
+        // Inside Gmail, move to message 2
+        nav.selected_index = 2;
+
+        // Press Backspace to ascend back to root []
+        nav.update_items(5, vec![], &config);
+
+        // REGRESSION TEST: Selected index must be restored to 2 (Gmail) in root context
+        assert_eq!(
+            nav.selected_index, 2,
+            "Ascending back to root must restore the previously selected Gmail card at index 2"
+        );
+    }
+
+    #[test]
+    fn test_nav_height_recalculated_and_scroll_offset_zero_on_ascend() {
+        let config = UiConfig::default();
+        let mut nav = NavState::new(&config);
+
+        // Root view with 5 items
+        nav.open_ui(5, vec![], &config);
+        // Expected height: padding(10)*2 + 5*card_height(98) + 4*spacing(10) = 20 + 490 + 40 = 550
+        assert_eq!(nav.height, 550);
+        assert_eq!(NavState::calc_max_visible_cards(nav.height, &config), 5);
+        assert_eq!(nav.scroll_offset, 0);
+
+        // Select Gmail at index 2
+        nav.selected_index = 2;
+        nav.adjust_scroll(5, &config);
+        assert_eq!(nav.scroll_offset, 0);
+
+        // Enter Gmail (3 items)
+        nav.update_items(3, vec!["Gmail".to_string()], &config);
+        // Expected height: 20 + 3*98 + 2*10 = 334
+        assert_eq!(nav.height, 334);
+        assert_eq!(NavState::calc_max_visible_cards(nav.height, &config), 3);
+        assert_eq!(nav.selected_index, 0);
+        assert_eq!(nav.scroll_offset, 0);
+
+        // Compositor sends configure for layer shell while in 3-item sub-group
+        nav.handle_configure(3, 334, &config);
+        assert_eq!(nav.height, 334);
+
+        // User presses Backspace to ascend back to root (5 items)
+        nav.update_items(5, vec![], &config);
+
+        // REGRESSION TEST:
+        // 1. Height must be 550 (not stuck at 334)
+        assert_eq!(
+            nav.height, 550,
+            "Returning to 5 root items must recompute height to 550, not remain stuck at 334"
+        );
+        // 2. Selected index restored to 2
+        assert_eq!(nav.selected_index, 2);
+        // 3. Scroll offset must be 0, NOT scrolled down hiding top 2 rows
+        assert_eq!(
+            nav.scroll_offset, 0,
+            "Returning to root must keep scroll_offset at 0 so all 5 items are visible without scrolling"
+        );
+        assert!(
+            nav.scroll_offset + NavState::calc_max_visible_cards(nav.height, &config) >= 5,
+            "All 5 items must be completely visible in viewport"
+        );
+
+        // REGRESSION TEST: Compositor race condition
+        // Sway may send a configure event with stale height 334 from before the resize
+        nav.handle_configure(5, 334, &config);
+        assert_eq!(
+            nav.height, 550,
+            "Stale configure height (334) must NOT overwrite target height (550)"
+        );
+        assert_eq!(nav.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_nav_scroll_adjustment_when_scrolling_past_viewport() {
+        let config = UiConfig::default(); // max_visible_cards = 8
+        let mut nav = NavState::new(&config);
+
+        // 10 items
+        nav.open_ui(10, vec![], &config);
+        assert_eq!(NavState::calc_max_visible_cards(nav.height, &config), 8);
+        assert_eq!(nav.scroll_offset, 0);
+
+        // Navigate to index 7 (fits in first page 0..7)
+        nav.selected_index = 7;
+        nav.adjust_scroll(10, &config);
+        assert_eq!(nav.scroll_offset, 0);
+
+        // Navigate to index 8 (scrolls viewport by 1)
+        nav.selected_index = 8;
+        nav.adjust_scroll(10, &config);
+        assert_eq!(nav.scroll_offset, 1);
+
+        // Navigate to index 9 (scrolls viewport by 2)
+        nav.selected_index = 9;
+        nav.adjust_scroll(10, &config);
+        assert_eq!(nav.scroll_offset, 2);
+
+        // Navigate back up to index 1 (scrolls offset back to 1)
+        nav.selected_index = 1;
+        nav.adjust_scroll(10, &config);
+        assert_eq!(nav.scroll_offset, 1);
+
+        // Navigate back up to index 0 (scrolls offset back to 0)
+        nav.selected_index = 0;
+        nav.adjust_scroll(10, &config);
+        assert_eq!(nav.scroll_offset, 0);
+    }
 }

@@ -84,6 +84,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/quiet" "$STAGING_DIR/quiet"
           cp "tools/quietctl" "$STAGING_DIR/quietctl"
           cp README.md "$STAGING_DIR/README.md"
+          cp quiet.toml "$STAGING_DIR/quiet.toml"
           tar -czvf "${{ matrix.archive_name }}.tar.gz" -C "$STAGING_DIR" .
           sha256sum "${{ matrix.archive_name }}.tar.gz" > "${{ matrix.archive_name }}.tar.gz.sha256"
 

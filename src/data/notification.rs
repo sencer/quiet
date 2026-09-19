@@ -2,6 +2,46 @@ use serde::{Deserialize, Serialize};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortOrder {
+    #[default]
+    NewestToOldest,
+    OldestToNewest,
+}
+
+impl Serialize for SortOrder {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            SortOrder::NewestToOldest => serializer.serialize_str("newest"),
+            SortOrder::OldestToNewest => serializer.serialize_str("oldest"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SortOrder {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.to_lowercase().replace('_', "-").trim() {
+            "oldest" | "oldest-to-newest" | "oldest-first" | "asc" | "ascending" | "chronological" => {
+                Ok(SortOrder::OldestToNewest)
+            }
+            "newest" | "newest-to-oldest" | "newest-first" | "desc" | "descending" | "reverse-chronological" => {
+                Ok(SortOrder::NewestToOldest)
+            }
+            other => Err(serde::de::Error::custom(format!(
+                "invalid sort order '{}', expected 'oldest' (or 'asc') or 'newest' (or 'desc')",
+                other
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Notification {
     pub id: u32,
@@ -37,6 +77,12 @@ pub struct Notification {
     pub sound_file: Option<String>,
     #[serde(default)]
     pub suppress_sound: bool,
+    #[serde(default)]
+    pub sort_order: SortOrder,
+    #[serde(default)]
+    pub group_sort_order: Option<SortOrder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
 }
 
 impl Notification {
@@ -81,6 +127,9 @@ impl Notification {
             category: None,
             sound_file: None,
             suppress_sound: false,
+            sort_order: SortOrder::default(),
+            group_sort_order: None,
+            keys: None,
         }
     }
 
@@ -307,5 +356,29 @@ mod tests {
         let minutes: u32 = t[3..5].parse().unwrap();
         assert!(hours < 24);
         assert!(minutes < 60);
+    }
+
+    #[test]
+    fn test_sort_order_serialization() {
+        let default_order = SortOrder::default();
+        assert_eq!(default_order, SortOrder::NewestToOldest);
+
+        let json_oldest: SortOrder = serde_json::from_str("\"oldest\"").unwrap();
+        assert_eq!(json_oldest, SortOrder::OldestToNewest);
+
+        let json_oldest_to_newest: SortOrder = serde_json::from_str("\"oldest_to_newest\"").unwrap();
+        assert_eq!(json_oldest_to_newest, SortOrder::OldestToNewest);
+
+        let json_asc: SortOrder = serde_json::from_str("\"asc\"").unwrap();
+        assert_eq!(json_asc, SortOrder::OldestToNewest);
+
+        let json_newest: SortOrder = serde_json::from_str("\"newest\"").unwrap();
+        assert_eq!(json_newest, SortOrder::NewestToOldest);
+
+        let json_desc: SortOrder = serde_json::from_str("\"desc\"").unwrap();
+        assert_eq!(json_desc, SortOrder::NewestToOldest);
+
+        let to_json = serde_json::to_string(&SortOrder::OldestToNewest).unwrap();
+        assert_eq!(to_json, "\"oldest\"");
     }
 }

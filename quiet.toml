@@ -1,0 +1,124 @@
+# Quiet Notification Daemon & Center Configuration
+# Pure-Rust, Wayland-native drop-in replacement for i3-notifier
+
+[behavior]
+sort = "newest"               # Global default sort: "newest" or "oldest"
+default_expires = false       # Do not expire notifications automatically by default
+default_expire_timeout_ms = 5000
+urgent_timeout_ms = 2500
+focus_on_action = true        # Race-free WM window focus when activating notification
+max_notifications = 500       # Maximum notifications retained in memory
+
+[ui]
+width = 600
+max_height_ratio = 0.85       # Maximum height as fraction of monitor height
+font_size = 21.0
+font_family = "Fira Mono"
+bg_color = "#00000000"        # Window background (transparent overlay)
+card_bg_color = "#4c4c4c"   # Normal notification card background
+cluster_bg_color = "#4c4c6c"  # Group / active card background
+selected_bg_color = "#6495ed" # Selected card highlight
+urgent_bg_color = "#cc5533"   # Urgent card background
+text_color = "#ddccbb"        # Main text color
+urgent_text_color = "#ffffff"
+margin_top = 0
+margin_right = 0
+margin_bottom = 0
+margin_left = 0
+padding = 10.0                # Window padding around cards (px)
+card_height = 98.0            # Height of each notification card (px)
+card_spacing = 10.0           # Vertical spacing between cards (px)
+corner_radius = 3.0           # Rounded corner radius (px)
+max_visible_cards = 8         # Maximum cards visible before scrollbar activates
+show_icons = true
+icon_size = 64
+icon_theme = "Papirus"
+
+# Declarative Transformation & Grouping Rules (First matching rule applies)
+
+[[rules]]
+name = "Gmail"
+app_name = "Google Chrome"
+body_prefix = "mail.google.com"
+strip_body_prefix = "mail.google.com"
+set_app_name = "Gmail"
+set_app_icon = "gmail"
+ignore_close = true           # Prevent web app 5s timer from auto-dismissing unread emails
+group_by = ["app_name", "body"]
+
+[[rules]]
+name = "Gmail-native"
+app_name = "Gmail"
+set_app_icon = "gmail"
+ignore_close = true
+group_by = ["app_name", "body"]
+
+[[rules]]
+name = "Chat"
+app_name = "Google Chrome"
+body_prefix = "chat.google.com"
+strip_body_prefix = "chat.google.com"
+set_app_name = "Chat"
+set_app_icon = "google-chat"
+group_by = ["app_name", "body"]
+
+[[rules]]
+name = "Meet"
+app_name = "Google Chrome"
+body_prefix = "meet.google.com"
+strip_body_prefix = "meet.google.com"
+set_app_name = "Meet"
+set_app_icon = "meet"
+group_by = ["app_name", "body"]
+
+[[rules]]
+name = "WhatsApp"
+app_name = "Google Chrome"
+body_prefix = "web.whatsapp.com"
+strip_body_prefix = "web.whatsapp.com"
+set_app_name = "WhatsApp"
+set_app_icon = "whatsapp"
+group_by = ["app_name", "summary"]
+sort = "oldest"               # Messages from a contact are sorted oldest-to-newest (chronological)
+
+[[rules]]
+name = "WhatsApp-native"
+app_name = "WhatsApp"
+set_app_icon = "whatsapp"
+group_by = ["app_name", "summary"]
+sort = "oldest"
+
+[[rules]]
+name = "Twitter"
+app_name = "Google Chrome"
+body_prefix = "twitter.com"
+strip_body_prefix = "twitter.com"
+set_app_name = "Twitter"
+set_app_icon = "twitter"
+group_by = ["app_name", "body"]
+
+[[rules]]
+name = "Instagram"
+app_name = "Google Chrome"
+body_prefix = "www.instagram.com"
+strip_body_prefix = "www.instagram.com"
+set_app_name = "Instagram"
+set_app_icon = "photos"
+group_by = ["app_name", "body"]
+
+[[rules]]
+name = "Chrome"
+app_name = "Google Chrome"
+set_app_icon = "google-chrome"
+set_app_name_from_body_line = 0
+strip_body_lines = 2
+group_by = ["app_name"]
+
+[[rules]]
+name = "notify-send"
+app_name = "notify-send"
+set_expires = true
+expire_timeout_ms = 5000
+set_app_name_from_summary = true
+set_app_icon = "plugin-notification"
+group_by = ["app_name", "body"]

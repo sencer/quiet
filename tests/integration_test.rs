@@ -1150,3 +1150,451 @@ async fn test_single_group_auto_expand_and_backspace_to_delete() {
     let _ = engine_handle.await;
 }
 
+#[tokio::test]
+async fn test_show_notifications_empty_does_not_trigger_ui() {
+    let dir = tempdir().unwrap();
+    let dump_path = dir.path().join("test_dump_empty_toggle.json");
+    let config = Config::default();
+
+    let (ui_tx, mut ui_rx) = mpsc::channel::<UiCommand>(32);
+    let (engine_tx, engine_rx) = mpsc::channel::<EngineMessage>(32);
+    let icon_cache = std::sync::Arc::new(quiet::icon::IconCache::new(None, 32));
+    let mut engine = Engine::new(config, dump_path, ui_tx, engine_rx, icon_cache);
+
+    let engine_handle = tokio::spawn(async move {
+        engine.run().await;
+    });
+
+    // Verify initial count is 0
+    let (reply_tx, reply_rx) = oneshot::channel();
+    engine_tx
+        .send(EngineMessage::ShowNotificationCount { reply: reply_tx })
+        .await
+        .unwrap();
+    let (count, _) = reply_rx.await.unwrap();
+    assert_eq!(count, 0);
+
+    // When ShowNotifications ($mod+e) is sent and there are no notifications,
+    // it MUST NOT trigger anything (no UiCommand::Open sent).
+    engine_tx
+        .send(EngineMessage::ShowNotifications)
+        .await
+        .unwrap();
+
+    let res = tokio::time::timeout(Duration::from_millis(150), ui_rx.recv()).await;
+    assert!(
+        res.is_err(),
+        "ShowNotifications should not trigger any UI command when notifications are empty"
+    );
+
+    engine_tx.send(EngineMessage::Quit).await.unwrap();
+    let _ = engine_handle.await;
+}
+
+#[tokio::test]
+async fn test_whatsapp_sorting_oldest_to_newest() {
+    let dir = tempdir().unwrap();
+    let dump_path = dir.path().join("test_dump_whatsapp_sort.json");
+    let config = Config::default();
+
+    let (ui_tx, mut ui_rx) = mpsc::channel::<UiCommand>(32);
+    let (engine_tx, engine_rx) = mpsc::channel::<EngineMessage>(32);
+    let icon_cache = std::sync::Arc::new(quiet::icon::IconCache::new(None, 32));
+    let mut engine = Engine::new(config, dump_path, ui_tx, engine_rx, icon_cache);
+
+    let engine_handle = tokio::spawn(async move {
+        engine.run().await;
+    });
+
+    // Send 3 WhatsApp messages from Mom in sequential order
+    let mom_messages = [
+        "First message from Mom (oldest)",
+        "Second message from Mom (middle)",
+        "Third message from Mom (newest)",
+    ];
+
+    for msg in mom_messages {
+        let mut hints = HashMap::new();
+        hints.insert("urgency".to_string(), OwnedValue::from(1u8));
+        let (reply_tx, reply_rx) = oneshot::channel();
+        engine_tx
+            .send(EngineMessage::Notify {
+                app_name: "Google Chrome".into(),
+                replaces_id: 0,
+                app_icon: "whatsapp".into(),
+                summary: "Mom".into(),
+                body: format!("web.whatsapp.com\n{}", msg),
+                actions: vec![],
+                hints,
+                expire_timeout: -1,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        let _ = reply_rx.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Also send 1 message from Dev Team (newer than Mom's messages)
+    {
+        let mut hints = HashMap::new();
+        hints.insert("urgency".to_string(), OwnedValue::from(1u8));
+        let (reply_tx, reply_rx) = oneshot::channel();
+        engine_tx
+            .send(EngineMessage::Notify {
+                app_name: "Google Chrome".into(),
+                replaces_id: 0,
+                app_icon: "whatsapp".into(),
+                summary: "Dev Team".into(),
+                body: "web.whatsapp.com\nDeploy finished".into(),
+                actions: vec![],
+                hints,
+                expire_timeout: -1,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        let _ = reply_rx.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Also send an ungrouped notification (Spotify, newest)
+    {
+        let mut hints = HashMap::new();
+        hints.insert("urgency".to_string(), OwnedValue::from(1u8));
+        let (reply_tx, reply_rx) = oneshot::channel();
+        engine_tx
+            .send(EngineMessage::Notify {
+                app_name: "Spotify".into(),
+                replaces_id: 0,
+                app_icon: "spotify".into(),
+                summary: "Song".into(),
+                body: "Playing music".into(),
+                actions: vec![],
+                hints,
+                expire_timeout: -1,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        let _ = reply_rx.await.unwrap();
+    }
+
+    // Open UI
+    engine_tx
+        .send(EngineMessage::ShowNotifications)
+        .await
+        .unwrap();
+
+    let open_cmd = ui_rx.recv().await.expect("Expected UiCommand::Open");
+    if let UiCommand::Open { items, context } = open_cmd {
+        assert!(context.is_empty(), "Root context");
+        // Root items should be sorted newest-first (Spotify newest, then WhatsApp group)
+        assert_eq!(items[0].app_name, "Spotify");
+        assert!(items[1].app_name.contains("WhatsApp (4)"));
+    } else {
+        panic!("Expected UiCommand::Open");
+    }
+
+    // Enter WhatsApp group
+    use quiet::engine::UiEvent;
+    engine_tx
+        .send(EngineMessage::UiEvent(UiEvent::EnterGroup("WhatsApp".into())))
+        .await
+        .unwrap();
+
+    let update_cmd = ui_rx.recv().await.expect("Expected UiCommand::UpdateItems");
+    if let UiCommand::UpdateItems { items, context } = update_cmd {
+        assert_eq!(context, vec!["WhatsApp".to_string()]);
+        assert_eq!(items.len(), 2, "WhatsApp should list Dev Team and Mom");
+        // Groups inside WhatsApp should be sorted newest-first (Dev Team has newest message)
+        assert_eq!(items[0].key, "Dev Team");
+        assert_eq!(items[1].key, "Mom");
+    } else {
+        panic!("Expected UiCommand::UpdateItems");
+    }
+
+    // Now enter Mom's conversation
+    engine_tx
+        .send(EngineMessage::UiEvent(UiEvent::EnterGroup("Mom".into())))
+        .await
+        .unwrap();
+
+    let update_cmd2 = ui_rx.recv().await.expect("Expected UiCommand::UpdateItems");
+    if let UiCommand::UpdateItems { items, context } = update_cmd2 {
+        assert_eq!(context, vec!["WhatsApp".to_string(), "Mom".to_string()]);
+        assert_eq!(items.len(), 3, "Mom should have 3 messages");
+        // Messages from a single person MUST be sorted oldest-to-newest!
+        assert_eq!(items[0].body, "First message from Mom (oldest)");
+        assert_eq!(items[1].body, "Second message from Mom (middle)");
+        assert_eq!(items[2].body, "Third message from Mom (newest)");
+    } else {
+        panic!("Expected UiCommand::UpdateItems");
+    }
+
+    engine_tx.send(EngineMessage::Quit).await.unwrap();
+    let _ = engine_handle.await;
+}
+
+#[tokio::test]
+async fn test_whatsapp_grouping_preserved_across_daemon_restart_and_dump_restore() {
+    let dir = tempdir().unwrap();
+    let dump_path = dir.path().join("test_dump_whatsapp_persistence.json");
+    let config = Config::default();
+
+    // 1. First run: populate notifications and shutdown cleanly
+    {
+        let (ui_tx, mut _ui_rx) = mpsc::channel::<UiCommand>(32);
+        let (engine_tx, engine_rx) = mpsc::channel::<EngineMessage>(32);
+        let icon_cache = std::sync::Arc::new(quiet::icon::IconCache::new(None, 32));
+        let mut engine = Engine::new(config.clone(), dump_path.clone(), ui_tx, engine_rx, icon_cache);
+
+        let engine_handle = tokio::spawn(async move {
+            engine.run().await;
+        });
+
+        // Send 2 WhatsApp messages from Mom
+        for (_i, msg) in ["Dinner on Sunday?", "Let me know!"].iter().enumerate() {
+            let mut hints = HashMap::new();
+            hints.insert("urgency".to_string(), OwnedValue::from(1u8));
+            let (reply_tx, reply_rx) = oneshot::channel();
+            engine_tx
+                .send(EngineMessage::Notify {
+                    app_name: "Google Chrome".into(),
+                    replaces_id: 0,
+                    app_icon: "whatsapp".into(),
+                    summary: "Mom".into(),
+                    body: format!("web.whatsapp.com\n{}", msg),
+                    actions: vec![],
+                    hints,
+                    expire_timeout: -1,
+                    reply: reply_tx,
+                })
+                .await
+                .unwrap();
+            let _ = reply_rx.await.unwrap();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // Send 1 WhatsApp message from Dev Team
+        {
+            let mut hints = HashMap::new();
+            hints.insert("urgency".to_string(), OwnedValue::from(1u8));
+            let (reply_tx, reply_rx) = oneshot::channel();
+            engine_tx
+                .send(EngineMessage::Notify {
+                    app_name: "Google Chrome".into(),
+                    replaces_id: 0,
+                    app_icon: "whatsapp".into(),
+                    summary: "Dev Team".into(),
+                    body: "web.whatsapp.com\nProd deploy ok".into(),
+                    actions: vec![],
+                    hints,
+                    expire_timeout: -1,
+                    reply: reply_tx,
+                })
+                .await
+                .unwrap();
+            let _ = reply_rx.await.unwrap();
+        }
+
+        // Send Quit to shut down and flush dump to disk
+        engine_tx.send(EngineMessage::Quit).await.unwrap();
+        let _ = engine_handle.await;
+    }
+
+    // 2. Verify dump file exists on disk and contains keys
+    assert!(dump_path.exists());
+    let dump_content = std::fs::read_to_string(&dump_path).unwrap();
+    assert!(dump_content.contains("\"keys\""));
+
+    // 3. Second run: restore from dump and verify WhatsApp grouping is 100% intact
+    {
+        let (ui_tx, mut ui_rx) = mpsc::channel::<UiCommand>(32);
+        let (engine_tx, engine_rx) = mpsc::channel::<EngineMessage>(32);
+        let icon_cache = std::sync::Arc::new(quiet::icon::IconCache::new(None, 32));
+        let mut engine = Engine::new(config.clone(), dump_path.clone(), ui_tx, engine_rx, icon_cache);
+
+        let engine_handle = tokio::spawn(async move {
+            engine.run().await;
+        });
+
+        // Open UI
+        engine_tx
+            .send(EngineMessage::ShowNotifications)
+            .await
+            .unwrap();
+
+        let open_cmd = ui_rx.recv().await.expect("Expected UiCommand::Open");
+        if let UiCommand::Open { items, context } = open_cmd {
+            // Because all notifications are WhatsApp, single-group auto-expand enters ["WhatsApp"]
+            assert_eq!(context, vec!["WhatsApp".to_string()]);
+            // WhatsApp group must have exactly 2 sub-clusters: "Dev Team" and "Mom", NOT 3 separated bodies!
+            assert_eq!(items.len(), 2, "WhatsApp must have exactly 2 sub-clusters (Mom and Dev Team)");
+            let mom_item = items.iter().find(|it| it.key == "Mom").expect("Mom cluster must exist");
+            assert_eq!(mom_item.count, 2, "Mom must contain 2 grouped messages");
+            assert_eq!(mom_item.title, "Mom (2)");
+        } else {
+            panic!("Expected UiCommand::Open");
+        }
+
+        // Enter Mom's group
+        use quiet::engine::UiEvent;
+        engine_tx
+            .send(EngineMessage::UiEvent(UiEvent::EnterGroup("Mom".into())))
+            .await
+            .unwrap();
+
+        let update_cmd = ui_rx.recv().await.expect("Expected UiCommand::UpdateItems");
+        if let UiCommand::UpdateItems { items, context } = update_cmd {
+            assert_eq!(context, vec!["WhatsApp".to_string(), "Mom".to_string()]);
+            assert_eq!(items.len(), 2, "Mom must have 2 messages");
+            assert_eq!(items[0].body, "Dinner on Sunday?");
+            assert_eq!(items[1].body, "Let me know!");
+        } else {
+            panic!("Expected UiCommand::UpdateItems");
+        }
+
+        engine_tx.send(EngineMessage::Quit).await.unwrap();
+        let _ = engine_handle.await;
+    }
+}
+
+#[tokio::test]
+async fn test_navigation_descend_gmail_and_backspace_to_root() {
+    let dir = tempdir().unwrap();
+    let dump_path = dir.path().join("test_dump_nav_ascend_descend.json");
+    let config = Config::default();
+
+    let (ui_tx, mut ui_rx) = mpsc::channel::<UiCommand>(32);
+    let (engine_tx, engine_rx) = mpsc::channel::<EngineMessage>(32);
+    let icon_cache = std::sync::Arc::new(quiet::icon::IconCache::new(None, 32));
+    let mut engine = Engine::new(config.clone(), dump_path.clone(), ui_tx, engine_rx, icon_cache);
+
+    let engine_handle = tokio::spawn(async move {
+        engine.run().await;
+    });
+
+    // 1. Send 1 Spotify notification
+    {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        engine_tx
+            .send(EngineMessage::Notify {
+                app_name: "Spotify".into(),
+                replaces_id: 0,
+                app_icon: "spotify".into(),
+                summary: "Song".into(),
+                body: "Playing music".into(),
+                actions: vec![],
+                hints: HashMap::new(),
+                expire_timeout: -1,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        let _ = reply_rx.await.unwrap();
+    }
+
+    // 2. Send 1 System notification
+    {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        engine_tx
+            .send(EngineMessage::Notify {
+                app_name: "System".into(),
+                replaces_id: 0,
+                app_icon: "battery".into(),
+                summary: "Battery Low".into(),
+                body: "15% remaining".into(),
+                actions: vec![],
+                hints: HashMap::new(),
+                expire_timeout: -1,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        let _ = reply_rx.await.unwrap();
+    }
+
+    // 3. Send 3 Gmail notifications
+    for (sender, subj) in [("Alice", "Meeting"), ("Bob", "Code review"), ("Charlie", "Standup")] {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        engine_tx
+            .send(EngineMessage::Notify {
+                app_name: "Google Chrome".into(),
+                replaces_id: 0,
+                app_icon: "gmail".into(),
+                summary: sender.into(),
+                body: format!("mail.google.com\n{}", subj),
+                actions: vec![],
+                hints: HashMap::new(),
+                expire_timeout: -1,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        let _ = reply_rx.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // 4. Open UI
+    engine_tx
+        .send(EngineMessage::ShowNotifications)
+        .await
+        .unwrap();
+
+    let open_cmd = ui_rx.recv().await.expect("Expected UiCommand::Open");
+    if let UiCommand::Open { items, context } = open_cmd {
+        assert!(context.is_empty(), "Initial context must be root");
+        // Root has Spotify, System, and Gmail group
+        assert_eq!(items.len(), 3, "Root must contain 3 items");
+        let gmail_item = items.iter().find(|it| it.key == "Gmail").expect("Gmail group must exist");
+        assert!(gmail_item.is_group);
+        assert_eq!(gmail_item.count, 3);
+    } else {
+        panic!("Expected UiCommand::Open, got {:?}", open_cmd);
+    }
+
+    // 5. User descends into Gmail group
+    use quiet::engine::UiEvent;
+    engine_tx
+        .send(EngineMessage::UiEvent(UiEvent::EnterGroup("Gmail".into())))
+        .await
+        .unwrap();
+
+    let update_cmd = ui_rx.recv().await.expect("Expected UiCommand::UpdateItems");
+    if let UiCommand::UpdateItems { items, context } = update_cmd {
+        assert_eq!(context, vec!["Gmail".to_string()]);
+        assert_eq!(items.len(), 3, "Gmail group must contain 3 individual messages");
+        for item in &items {
+            assert_eq!(item.app_name, "Gmail");
+            assert!(!item.is_group);
+        }
+    } else {
+        panic!("Expected UiCommand::UpdateItems, got {:?}", update_cmd);
+    }
+
+    // 6. User presses Backspace to ascend back to root
+    engine_tx
+        .send(EngineMessage::UiEvent(UiEvent::LeaveGroup))
+        .await
+        .unwrap();
+
+    let update_cmd2 = ui_rx.recv().await.expect("Expected UiCommand::UpdateItems");
+    if let UiCommand::UpdateItems { items, context } = update_cmd2 {
+        assert!(context.is_empty(), "Ascending from Gmail must return to root []");
+        assert_eq!(items.len(), 3, "Root must restore 3 items (Spotify, System, Gmail cluster)");
+        let gmail_item = items.iter().find(|it| it.key == "Gmail").expect("Gmail group must exist");
+        assert!(gmail_item.is_group);
+        assert_eq!(gmail_item.count, 3);
+    } else {
+        panic!("Expected UiCommand::UpdateItems, got {:?}", update_cmd2);
+    }
+
+    engine_tx.send(EngineMessage::Quit).await.unwrap();
+    let _ = engine_handle.await;
+}
+
+
+
+
+
