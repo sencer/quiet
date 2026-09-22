@@ -32,8 +32,16 @@ use smithay_client_toolkit::{
 };
 use std::sync::Arc;
 use tiny_skia::PixmapMut;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
+
+struct UiHealthGuard(watch::Sender<bool>);
+
+impl Drop for UiHealthGuard {
+    fn drop(&mut self) {
+        let _ = self.0.send(false);
+    }
+}
 
 pub struct AppState {
     pub registry_state: RegistryState,
@@ -859,9 +867,13 @@ pub fn spawn_ui_worker(
     config: Config,
     engine_tx: mpsc::Sender<EngineMessage>,
     icon_cache: Arc<crate::icon::IconCache>,
-) -> calloop::channel::Sender<UiCommand> {
+) -> (
+    calloop::channel::Sender<UiCommand>,
+    watch::Receiver<bool>,
+) {
     let (calloop_tx, calloop_rx) = channel::<UiCommand>();
     let ret_tx = calloop_tx.clone();
+    let (health_tx, health_rx) = watch::channel(false);
 
     let spawn_res = std::thread::Builder::new()
         .name("quiet-ui".into())
@@ -986,6 +998,8 @@ pub fn spawn_ui_worker(
             }
 
             info!("Wayland UI event loop initialized successfully");
+            let health_guard = UiHealthGuard(health_tx);
+            let _ = health_guard.0.send(true);
 
             while !app_state.exit {
                 if let Err(e) = event_loop.dispatch(None, &mut app_state) {
@@ -1001,7 +1015,7 @@ pub fn spawn_ui_worker(
         error!("Failed to spawn UI thread: {}", e);
     }
 
-    ret_tx
+    (ret_tx, health_rx)
 }
 
 #[cfg(test)]

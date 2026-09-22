@@ -97,6 +97,11 @@ pub fn score_sway_container(
 
     let target_app = hints.app_name.to_lowercase();
     let target_summary = hints.summary.to_lowercase();
+    // Web-push providers commonly use a hostname as the app name (for example
+    // "cleverpush.com"), while the browser tab title uses the brand name
+    // ("CleverPush").  Keep matching the full name first, but also retain its
+    // leading hostname label for browser-title matching.
+    let target_hostname_label = target_app.split('.').next().unwrap_or_default();
 
     // 1. Summary match in window title (e.g. contact "Mom" or document title)
     if !target_summary.is_empty() && name_lower.contains(&target_summary) {
@@ -125,7 +130,10 @@ pub fn score_sway_container(
             || class_lower.contains("chromium")
             || app_id_lower.contains("brave")
             || app_id_lower.contains("firefox");
-        if is_browser && name_lower.contains(&target_app) {
+        if is_browser
+            && !target_hostname_label.is_empty()
+            && name_lower.contains(target_hostname_label)
+        {
             score += 60;
         }
     }
@@ -418,5 +426,23 @@ mod tests {
             &hints,
         );
         assert!(score >= 100);
+    }
+
+    #[test]
+    fn test_score_sway_container_web_push_hostname_matches_browser_tab() {
+        let hints = FocusTargetHints {
+            app_name: "cleverpush.com".into(),
+            summary: "Germany is world champion!".into(),
+            body: "Click to read more".into(),
+        };
+
+        let score = score_sway_container(
+            Some("CleverPush - Push notifications for web browsers - Google Chrome"),
+            Some("google-chrome"),
+            Some("Google-chrome"),
+            &hints,
+        );
+
+        assert!(score >= 60);
     }
 }

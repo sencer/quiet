@@ -1,17 +1,18 @@
 use crate::engine::EngineMessage;
 use std::collections::HashMap;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::info;
 use zbus::object_server::SignalEmitter;
 use zvariant::OwnedValue;
 
 pub struct NotificationsInterface {
     engine_tx: mpsc::Sender<EngineMessage>,
+    ui_health: watch::Receiver<bool>,
 }
 
 impl NotificationsInterface {
-    pub fn new(engine_tx: mpsc::Sender<EngineMessage>) -> Self {
-        Self { engine_tx }
+    pub fn new(engine_tx: mpsc::Sender<EngineMessage>, ui_health: watch::Receiver<bool>) -> Self {
+        Self { engine_tx, ui_health }
     }
 }
 
@@ -112,6 +113,11 @@ impl NotificationsInterface {
 
     /// ShowNotifications method (interactive UI toggle)
     async fn show_notifications(&self) -> zbus::fdo::Result<()> {
+        if !*self.ui_health.borrow() {
+            return Err(zbus::fdo::Error::Failed(
+                "Notification UI is unavailable".into(),
+            ));
+        }
         self.engine_tx
             .send(EngineMessage::ShowNotifications)
             .await
@@ -161,4 +167,32 @@ impl NotificationsInterface {
         urgency: u32,
         single_line: &str,
     ) -> zbus::Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn show_notifications_fails_when_ui_is_unhealthy() {
+        let (engine_tx, _engine_rx) = mpsc::channel(1);
+        let (_health_tx, health_rx) = watch::channel(false);
+        let interface = NotificationsInterface::new(engine_tx, health_rx);
+
+        let error = interface.show_notifications().await.unwrap_err();
+        assert!(error.to_string().contains("UI is unavailable"));
+    }
+
+    #[tokio::test]
+    async fn show_notifications_reaches_engine_when_ui_is_healthy() {
+        let (engine_tx, mut engine_rx) = mpsc::channel(1);
+        let (_health_tx, health_rx) = watch::channel(true);
+        let interface = NotificationsInterface::new(engine_tx, health_rx);
+
+        interface.show_notifications().await.unwrap();
+        assert!(matches!(
+            engine_rx.recv().await,
+            Some(EngineMessage::ShowNotifications)
+        ));
+    }
 }

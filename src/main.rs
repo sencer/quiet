@@ -260,13 +260,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     // Spawn native Wayland layer-shell UI worker
-    let ui_tx = spawn_ui_worker(config.clone(), engine_tx.clone(), icon_cache.clone());
+    let (ui_tx, ui_health) =
+        spawn_ui_worker(config.clone(), engine_tx.clone(), icon_cache.clone());
 
     // Initialize Engine
     let mut engine = Engine::new(config, dump_path, ui_tx, engine_rx, icon_cache);
 
     // Setup D-Bus service
-    let iface = NotificationsInterface::new(engine_tx.clone());
+    let iface = NotificationsInterface::new(engine_tx.clone(), ui_health);
     let dbus_conn = match zbus::connection::Builder::session()?
         .name("org.freedesktop.Notifications")?
         .serve_at("/org/freedesktop/Notifications", iface)?
