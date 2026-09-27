@@ -49,9 +49,25 @@ pub enum UiCommand {
 }
 
 #[derive(Clone)]
+pub struct UiChannelSender {
+    queue: Arc<std::sync::Mutex<std::collections::VecDeque<UiCommand>>>,
+    ping: Arc<std::sync::Mutex<Option<calloop::ping::Ping>>>,
+}
+
+impl UiChannelSender {
+    pub fn new(
+        queue: Arc<std::sync::Mutex<std::collections::VecDeque<UiCommand>>>,
+        ping: Arc<std::sync::Mutex<Option<calloop::ping::Ping>>>,
+    ) -> Self {
+        Self { queue, ping }
+    }
+}
+
+#[derive(Clone)]
 pub enum UiSender {
     Tokio(mpsc::Sender<UiCommand>),
     Calloop(calloop::channel::Sender<UiCommand>),
+    ThreadSafe(UiChannelSender),
 }
 
 impl UiSender {
@@ -62,6 +78,16 @@ impl UiSender {
             }
             UiSender::Calloop(tx) => {
                 let _ = tx.send(cmd);
+            }
+            UiSender::ThreadSafe(s) => {
+                if let Ok(mut q) = s.queue.lock() {
+                    q.push_back(cmd);
+                }
+                if let Ok(p_opt) = s.ping.lock() {
+                    if let Some(ref p) = *p_opt {
+                        p.ping();
+                    }
+                }
             }
         }
     }
@@ -76,6 +102,12 @@ impl From<mpsc::Sender<UiCommand>> for UiSender {
 impl From<calloop::channel::Sender<UiCommand>> for UiSender {
     fn from(tx: calloop::channel::Sender<UiCommand>) -> Self {
         UiSender::Calloop(tx)
+    }
+}
+
+impl From<UiChannelSender> for UiSender {
+    fn from(s: UiChannelSender) -> Self {
+        UiSender::ThreadSafe(s)
     }
 }
 

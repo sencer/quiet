@@ -3,7 +3,6 @@ pub mod render;
 use crate::config::{Config, UiConfig};
 use crate::engine::{EngineMessage, UiCommand, UiEvent, UiItem};
 use crate::ui::render::Renderer;
-use calloop::channel::{channel, Event as ChannelEvent};
 use calloop::EventLoop;
 use calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::{
@@ -868,12 +867,18 @@ pub fn spawn_ui_worker(
     engine_tx: mpsc::Sender<EngineMessage>,
     icon_cache: Arc<crate::icon::IconCache>,
 ) -> (
-    calloop::channel::Sender<UiCommand>,
+    crate::engine::UiSender,
     watch::Receiver<bool>,
 ) {
-    let (calloop_tx, calloop_rx) = channel::<UiCommand>();
-    let ret_tx = calloop_tx.clone();
+    let ui_queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<UiCommand>::new()));
+    let active_ping = Arc::new(std::sync::Mutex::new(Option::<calloop::ping::Ping>::None));
+    let ui_sender = crate::engine::UiSender::ThreadSafe(
+        crate::engine::UiChannelSender::new(ui_queue.clone(), active_ping.clone()),
+    );
     let (health_tx, health_rx) = watch::channel(false);
+
+    let thread_queue = ui_queue.clone();
+    let thread_active_ping = active_ping.clone();
 
     let spawn_res = std::thread::Builder::new()
         .name("quiet-ui".into())
@@ -882,9 +887,10 @@ pub fn spawn_ui_worker(
                 Ok(c) => c,
                 Err(e) => {
                     warn!(
-                        "Could not connect to Wayland display ({}); running in headless mode",
+                        "Could not connect to Wayland display ({}). Shutting down daemon.",
                         e
                     );
+                    let _ = engine_tx.blocking_send(EngineMessage::Quit);
                     return;
                 }
             };
@@ -895,6 +901,7 @@ pub fn spawn_ui_worker(
                     Ok(res) => res,
                     Err(e) => {
                         error!("Failed to initialize Wayland registry queue: {}", e);
+                        let _ = engine_tx.blocking_send(EngineMessage::Quit);
                         return;
                     }
                 };
@@ -904,6 +911,7 @@ pub fn spawn_ui_worker(
                 Ok(cs) => cs,
                 Err(e) => {
                     error!("wl_compositor not available: {}", e);
+                    let _ = engine_tx.blocking_send(EngineMessage::Quit);
                     return;
                 }
             };
@@ -911,6 +919,7 @@ pub fn spawn_ui_worker(
                 Ok(ls) => ls,
                 Err(e) => {
                     error!("zwlr_layer_shell_v1 not available: {}", e);
+                    let _ = engine_tx.blocking_send(EngineMessage::Quit);
                     return;
                 }
             };
@@ -918,6 +927,7 @@ pub fn spawn_ui_worker(
                 Ok(s) => s,
                 Err(e) => {
                     error!("wl_shm not available: {}", e);
+                    let _ = engine_tx.blocking_send(EngineMessage::Quit);
                     return;
                 }
             };
@@ -928,6 +938,7 @@ pub fn spawn_ui_worker(
                 Ok(p) => p,
                 Err(e) => {
                     error!("Failed to create SlotPool: {}", e);
+                    let _ = engine_tx.blocking_send(EngineMessage::Quit);
                     return;
                 }
             };
@@ -950,7 +961,7 @@ pub fn spawn_ui_worker(
                 width: config.ui.width,
                 height: 1080,
                 configured: false,
-                engine_tx,
+                engine_tx: engine_tx.clone(),
                 config,
                 exit: false,
                 modifiers: Modifiers::default(),
@@ -964,6 +975,7 @@ pub fn spawn_ui_worker(
                 Ok(el) => el,
                 Err(e) => {
                     error!("Failed to create calloop EventLoop: {}", e);
+                    let _ = engine_tx.blocking_send(EngineMessage::Quit);
                     return;
                 }
             };
@@ -971,13 +983,30 @@ pub fn spawn_ui_worker(
             let wayland_source = WaylandSource::new(conn.clone(), event_queue);
             if let Err(e) = wayland_source.insert(event_loop.handle()) {
                 error!("Failed to insert WaylandSource: {}", e);
+                let _ = engine_tx.blocking_send(EngineMessage::Quit);
                 return;
             }
 
-            if let Err(e) = event_loop
-                .handle()
-                .insert_source(calloop_rx, |event, _, state| match event {
-                    ChannelEvent::Msg(cmd) => match cmd {
+            let (ping_tx, ping_rx) = match calloop::ping::make_ping() {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("Failed to create calloop ping source: {}", e);
+                    let _ = engine_tx.blocking_send(EngineMessage::Quit);
+                    return;
+                }
+            };
+
+            let queue_for_ping = thread_queue.clone();
+            if let Err(e) = event_loop.handle().insert_source(ping_rx, move |_event, _metadata, state| {
+                let cmds: Vec<UiCommand> = {
+                    if let Ok(mut q) = queue_for_ping.lock() {
+                        q.drain(..).collect()
+                    } else {
+                        Vec::new()
+                    }
+                };
+                for cmd in cmds {
+                    match cmd {
                         UiCommand::Open { items, context } => {
                             state.open_ui(items, context);
                         }
@@ -987,18 +1016,36 @@ pub fn spawn_ui_worker(
                         UiCommand::Close => {
                             state.close_ui();
                         }
-                    },
-                    ChannelEvent::Closed => {
-                        state.exit = true;
                     }
-                })
-            {
-                error!("Failed to insert calloop channel: {}", e);
+                }
+            }) {
+                error!("Failed to insert ping source: {}", e);
+                let _ = engine_tx.blocking_send(EngineMessage::Quit);
                 return;
             }
 
+            if let Ok(mut active_p) = thread_active_ping.lock() {
+                *active_p = Some(ping_tx);
+            }
+
+            // Process any commands that arrived before ping was registered
+            let initial_cmds: Vec<UiCommand> = {
+                if let Ok(mut q) = thread_queue.lock() {
+                    q.drain(..).collect()
+                } else {
+                    Vec::new()
+                }
+            };
+            for cmd in initial_cmds {
+                match cmd {
+                    UiCommand::Open { items, context } => app_state.open_ui(items, context),
+                    UiCommand::UpdateItems { items, context } => app_state.update_items(items, context),
+                    UiCommand::Close => app_state.close_ui(),
+                }
+            }
+
             info!("Wayland UI event loop initialized successfully");
-            let health_guard = UiHealthGuard(health_tx);
+            let health_guard = UiHealthGuard(health_tx.clone());
             let _ = health_guard.0.send(true);
 
             while !app_state.exit {
@@ -1008,14 +1055,20 @@ pub fn spawn_ui_worker(
                 }
             }
 
-            info!("Wayland UI thread finished");
+            if let Ok(mut active_p) = thread_active_ping.lock() {
+                *active_p = None;
+            }
+            drop(health_guard);
+
+            info!("Wayland UI thread finished; shutting down daemon");
+            let _ = engine_tx.blocking_send(EngineMessage::Quit);
         });
 
     if let Err(e) = spawn_res {
         error!("Failed to spawn UI thread: {}", e);
     }
 
-    (ret_tx, health_rx)
+    (ui_sender, health_rx)
 }
 
 #[cfg(test)]

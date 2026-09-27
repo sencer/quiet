@@ -108,15 +108,15 @@ int main(int argc, char *argv[]) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    const char *runtime_dir = getenv("XDG_RUNTIME_DIR");
-    if (runtime_dir) {
-        snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/bus", runtime_dir);
+    const char *dbus_addr = getenv("DBUS_SESSION_BUS_ADDRESS");
+    if (dbus_addr && strncmp(dbus_addr, "unix:path=", 10) == 0) {
+        snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", dbus_addr + 10);
+        char *comma = strchr(addr.sun_path, ',');
+        if (comma) *comma = '\0';
     } else {
-        const char *dbus_addr = getenv("DBUS_SESSION_BUS_ADDRESS");
-        if (dbus_addr && strncmp(dbus_addr, "unix:path=", 10) == 0) {
-            snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", dbus_addr + 10);
-            char *comma = strchr(addr.sun_path, ',');
-            if (comma) *comma = '\0';
+        const char *runtime_dir = getenv("XDG_RUNTIME_DIR");
+        if (runtime_dir) {
+            snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/bus", runtime_dir);
         } else {
             snprintf(addr.sun_path, sizeof(addr.sun_path), "/run/user/%u/bus", getuid());
         }
