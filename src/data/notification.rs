@@ -47,6 +47,10 @@ pub struct Notification {
     pub id: u32,
     #[serde(default)]
     pub app_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_app_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_entry: Option<String>,
     #[serde(default)]
     pub app_icon: String,
     #[serde(default)]
@@ -85,6 +89,25 @@ pub struct Notification {
     pub keys: Option<Vec<String>>,
 }
 
+/// Selects the default Freedesktop notification action key to invoke on card activation.
+///
+/// Per the Desktop Notifications Specification, `actions` is a flat list of pairs:
+/// `[key_0, label_0, key_1, label_1, ...]`.
+/// Chromium pushes custom action buttons (`"0"`, `"1"`, ...) before `"default"` and `"settings"`.
+/// Clicking the notification body itself should always prefer `"default"` if present,
+/// or fall back to the first non-`"settings"` action key.
+pub fn default_action_key(actions: &[String]) -> String {
+    if actions.iter().step_by(2).any(|k| k == "default") {
+        return "default".to_string();
+    }
+    actions
+        .iter()
+        .step_by(2)
+        .find(|k| k.as_str() != "settings")
+        .cloned()
+        .unwrap_or_else(|| "default".to_string())
+}
+
 impl Notification {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -109,9 +132,17 @@ impl Notification {
             None
         };
 
+        let original_app_name = if app_name.is_empty() {
+            None
+        } else {
+            Some(app_name.clone())
+        };
+
         Self {
             id,
             app_name,
+            original_app_name,
+            desktop_entry: None,
             app_icon,
             summary,
             body,
@@ -380,5 +411,39 @@ mod tests {
 
         let to_json = serde_json::to_string(&SortOrder::OldestToNewest).unwrap();
         assert_eq!(to_json, "\"oldest\"");
+    }
+
+    #[test]
+    fn test_default_action_key_prefers_default_over_chrome_buttons_and_settings() {
+        // Chrome notification with action buttons before "default" and "settings"
+        let chrome_with_buttons = vec![
+            "0".to_string(),
+            "Reply".to_string(),
+            "1".to_string(),
+            "Mark as read".to_string(),
+            "default".to_string(),
+            "".to_string(),
+            "settings".to_string(),
+            "Site settings".to_string(),
+        ];
+        assert_eq!(default_action_key(&chrome_with_buttons), "default");
+
+        // Chrome notification with only "settings" button
+        let chrome_settings_only = vec![
+            "settings".to_string(),
+            "Site settings".to_string(),
+        ];
+        assert_eq!(default_action_key(&chrome_settings_only), "default");
+
+        // Native notification with custom action
+        let media_actions = vec![
+            "pause".to_string(),
+            "Pause".to_string(),
+        ];
+        assert_eq!(default_action_key(&media_actions), "pause");
+
+        // Empty actions
+        let empty: Vec<String> = vec![];
+        assert_eq!(default_action_key(&empty), "default");
     }
 }

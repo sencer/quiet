@@ -405,14 +405,12 @@ impl KeyboardHandler for AppState {
                 if self.modifiers.shift {
                     if let Some(item) = self.items.get(self.selected_index) {
                         if let Some(id) = item.id {
-                            let action_key = item
-                                .actions
-                                .first()
-                                .cloned()
-                                .unwrap_or_else(|| "default".into());
+                            let action_key =
+                                crate::data::notification::default_action_key(&item.actions);
                             let _ = self.engine_tx.try_send(EngineMessage::UiEvent(
                                 UiEvent::ActionInvoked { id, action_key },
                             ));
+                            self.close_ui();
                         }
                     }
                 } else {
@@ -647,7 +645,6 @@ impl AppState {
         let mut nav = self.to_nav_state();
         nav.open_ui(self.items.len(), context, &self.config.ui);
         self.apply_nav_state(nav);
-        self.last_action_time = std::time::Instant::now();
 
         if self.config.ui.show_icons {
             for item in &self.items {
@@ -791,17 +788,14 @@ impl AppState {
                         item.key.clone(),
                     )));
             } else if let Some(id) = item.id {
-                let action_key = item
-                    .actions
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "default".into());
+                let action_key = crate::data::notification::default_action_key(&item.actions);
                 let _ = self
                     .engine_tx
                     .try_send(EngineMessage::UiEvent(UiEvent::ActionInvoked {
                         id,
                         action_key,
                     }));
+                self.close_ui();
             }
         }
     }
@@ -967,7 +961,9 @@ pub fn spawn_ui_worker(
                 modifiers: Modifiers::default(),
                 scale_factor: 1,
                 scroll_accumulator: 0.0,
-                last_action_time: std::time::Instant::now(),
+                last_action_time: std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(1))
+                    .unwrap_or_else(std::time::Instant::now),
                 context_history: std::collections::HashMap::new(),
             };
 

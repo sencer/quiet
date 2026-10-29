@@ -400,20 +400,20 @@ impl Engine {
                 }
 
                 // 2. Resolve via desktop-entry hint if present
+                let desktop_entry = hints.get("desktop-entry").and_then(|entry_val| {
+                    match unwrap_variant(entry_val) {
+                        zvariant::Value::Str(s) if !s.is_empty() => Some(s.to_string()),
+                        _ => None,
+                    }
+                });
                 if resolved_icon.is_empty() || resolved_app.is_empty() {
-                    if let Some(entry_val) = hints.get("desktop-entry") {
-                        let s_opt = match unwrap_variant(entry_val) {
-                            zvariant::Value::Str(s) => Some(s.as_str()),
-                            _ => None,
-                        };
-                        if let Some(s) = s_opt {
-                            if let Some(entry) = crate::icon::desktop::lookup_desktop_entry(s) {
-                                if resolved_app.is_empty() {
-                                    resolved_app = entry.name;
-                                }
-                                if resolved_icon.is_empty() {
-                                    resolved_icon = entry.icon;
-                                }
+                    if let Some(ref s) = desktop_entry {
+                        if let Some(entry) = crate::icon::desktop::lookup_desktop_entry(s) {
+                            if resolved_app.is_empty() {
+                                resolved_app = entry.name;
+                            }
+                            if resolved_icon.is_empty() {
+                                resolved_icon = entry.icon;
                             }
                         }
                     }
@@ -494,6 +494,7 @@ impl Engine {
                     expire_timeout,
                 );
 
+                notif.desktop_entry = desktop_entry;
                 notif.transient = transient;
                 notif.resident = resident;
                 notif.action_icons = action_icons;
@@ -726,11 +727,17 @@ impl Engine {
             UiEvent::ActionInvoked { id, action_key } => {
                 let (is_resident, hints) = if let Some(keys) = self.map.get(&id) {
                     let ctx = self.tree.get_context(keys, false);
-                    if let Some(ClusterNode::Leaf(notif)) = ctx.children.get(&id.to_string()) {
+                    let notif_opt = match ctx.children.get(&id.to_string()) {
+                        Some(ClusterNode::Leaf(notif)) => Some(notif.clone()),
+                        _ => self.tree.leafs().into_iter().find(|n| n.id == id),
+                    };
+                    if let Some(notif) = notif_opt {
                         (
                             notif.resident,
                             crate::ipc::sway::FocusTargetHints {
                                 app_name: notif.app_name.clone(),
+                                original_app_name: notif.original_app_name.clone(),
+                                desktop_entry: notif.desktop_entry.clone(),
                                 summary: notif.summary.clone(),
                                 body: notif.body.clone(),
                             },

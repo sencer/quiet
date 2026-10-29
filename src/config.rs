@@ -317,6 +317,10 @@ impl RuleConfig {
     }
 
     pub fn apply(&self, n: &mut Notification) {
+        if n.original_app_name.is_none() && !n.app_name.is_empty() {
+            n.original_app_name = Some(n.app_name.clone());
+        }
+
         if let Some(ref prefix) = self.strip_body_prefix {
             if n.body.starts_with(prefix) {
                 n.body = n.body[prefix.len()..].trim().to_string();
